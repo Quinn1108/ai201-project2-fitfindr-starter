@@ -62,6 +62,103 @@ Your implementation files go in this same directory. There's no required file st
 
 ---
 
+## Tools
+
+### `search_listings(description, size, max_price)` — `tools.py`
+Searches the mock listings dataset for secondhand items matching a natural language description, with optional size and price filters.
+
+| Parameter | Type | Purpose |
+|---|---|---|
+| `description` | `str` | Free-text keywords describing the item (e.g. `"vintage graphic tee"`) |
+| `size` | `str \| None` | Size to filter by — case-insensitive substring match (e.g. `"M"` matches `"S/M"`); `None` skips size filtering |
+| `max_price` | `float \| None` | Maximum price inclusive in USD; `None` skips price filtering |
+
+**Returns:** A list of listing dicts sorted by keyword relevance (highest first). Each dict contains: `id`, `title`, `description`, `category`, `style_tags` (list), `size`, `condition`, `price` (float), `colors` (list), `brand`, `platform`. Returns `[]` if nothing matches — never raises.
+
+---
+
+### `suggest_outfit(new_item, wardrobe)` — `tools.py`
+Given the selected thrifted item and the user's wardrobe, calls the Groq LLM to suggest 1–2 complete outfits.
+
+| Parameter | Type | Purpose |
+|---|---|---|
+| `new_item` | `dict` | A single listing dict from `search_listings` results |
+| `wardrobe` | `dict` | Wardrobe dict with an `"items"` key containing a list of wardrobe item dicts |
+
+**Returns:** A non-empty string with outfit suggestions. If the wardrobe is empty, returns general styling advice for the item instead of outfit combinations.
+
+---
+
+### `create_fit_card(outfit, new_item)` — `tools.py`
+Generates a short, shareable Instagram/TikTok-style caption for the thrifted find.
+
+| Parameter | Type | Purpose |
+|---|---|---|
+| `outfit` | `str` | The outfit suggestion string from `suggest_outfit` |
+| `new_item` | `dict` | The selected listing dict (used for title, price, platform) |
+
+**Returns:** A 2–4 sentence caption string that mentions the item name, price, and platform naturally. If `outfit` is empty or whitespace-only, returns a descriptive error string instead of raising.
+
+---
+
+## Planning Loop
+
+The agent uses a fixed conditional pipeline — it does not call all three tools unconditionally:
+
+1. **Parse** the user query with regex to extract `description`, `size`, and `max_price`. No LLM call at this step.
+2. **Call `search_listings`** with the parsed parameters.
+3. **Check results:** if the list is empty, set `session["error"]` to a message telling the user what to try next, and **return immediately** — `suggest_outfit` and `create_fit_card` are never called.
+4. If results exist, **select `results[0]`** as `selected_item`.
+5. **Call `suggest_outfit`** with `selected_item` and the user's wardrobe.
+6. **Call `create_fit_card`** with the outfit string and `selected_item`.
+7. Return the completed session.
+
+The key decision point is step 3: the agent checks `len(search_results) == 0` and branches to an early return rather than proceeding with empty input.
+
+---
+
+## State Management
+
+All state lives in a single session dict created at the start of each `run_agent()` call. No state persists between calls. Values are written once by each step and read by the next — no re-prompting or re-fetching:
+
+| Field | Written by | Read by |
+|---|---|---|
+| `parsed` | Step 2 (regex parse) | Step 3 (`search_listings` args) |
+| `search_results` | Step 3 (`search_listings`) | Step 3 (empty check), Step 4 (select item) |
+| `selected_item` | Step 4 (assignment from `results[0]`) | Step 5 (`suggest_outfit`), Step 6 (`create_fit_card`) |
+| `outfit_suggestion` | Step 5 (`suggest_outfit`) | Step 6 (`create_fit_card`), final output |
+| `fit_card` | Step 6 (`create_fit_card`) | Final output |
+| `error` | Step 3 (if no results) | Caller checks before reading other fields |
+
+`selected_item` is the same dict object passed into both `suggest_outfit` and `create_fit_card` — verified with Python `id()` checks during testing to confirm no intermediate copying or re-fetching occurs.
+
+---
+
+## Error Handling
+
+| Tool | Failure mode | Agent response |
+|---|---|---|
+| `search_listings` | Returns empty list (no keyword/price/size match) | Sets `session["error"]` with a specific message naming the query and suggesting what to broaden; returns immediately without calling the remaining tools |
+| `suggest_outfit` | Wardrobe is empty (`wardrobe["items"] == []`) | Calls LLM with a general styling prompt instead of a wardrobe-specific one; still returns a non-empty string and continues to `create_fit_card` |
+| `create_fit_card` | `outfit` is empty or whitespace-only | Returns a descriptive error string without calling the LLM; does not raise |
+
+**Concrete example from testing:** running `run_agent("designer ballgown size XXS under $5", wardrobe)` returns:
+```
+session["error"] = "No listings found matching 'designer ballgown size XXS under $5'. Try broadening your search — different keywords, a higher price, or no size filter."
+session["fit_card"] = None
+```
+`suggest_outfit` was not called — confirmed by running `python agent.py` and observing no LLM output between the two test case headers.
+
+---
+
+## Spec Reflection
+
+**One way the spec helped:** Writing out the failure mode for `search_listings` before implementing it — "returns `[]`, never raises" — made the early-return branch in `run_agent` obvious. Without that constraint in the spec, the temptation would have been to raise an exception in the tool itself and catch it in the loop, which would have made the error message harder to customize.
+
+**One divergence from the spec:** The planning.md spec says size defaults to `"M"` if not specified. The implementation sets size to `None` instead, which skips size filtering entirely. Defaulting to `"M"` would silently exclude results in other sizes when the user didn't ask for a size filter — `None` is more correct behavior and matches the `search_listings` docstring.
+
+---
+
 ## AI Tool Usage
 
 ### Instance 1 — Implementing `search_listings`
