@@ -18,6 +18,8 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
 
 
@@ -92,9 +94,73 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: Initialize session
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: Parse the query with regex
+    q = query.lower()
+
+    # Extract max_price — matches "under $30", "max $50", "$25", "under 30", etc.
+    price_match = re.search(r"(?:under|max|below|<)?\s*\$?(\d+(?:\.\d+)?)", q)
+    max_price = float(price_match.group(1)) if price_match else None
+
+    # Extract size — matches "size M", "size XL", standalone S/M/L/XL/XXS/XXL etc.
+    size_match = re.search(
+        r"\bsize\s+([A-Za-z0-9/]+)\b|\b(XXS|XS|S/M|M/L|XS/S|L/XL|XS|S|M|L|XL|XXL|XXXL)\b",
+        query,
+        re.IGNORECASE,
+    )
+    size = None
+    if size_match:
+        size = (size_match.group(1) or size_match.group(2)).upper()
+
+    # Description: strip price/size tokens to leave clean search keywords
+    description = re.sub(
+        r"(?:under|max|below|<)?\s*\$\d+(?:\.\d+)?", "", q
+    )
+    description = re.sub(
+        r"\bsize\s+[A-Za-z0-9/]+\b|\b(XXS|XS|S/M|M/L|XS/S|L/XL|XS|S|M|L|XL|XXL|XXXL)\b",
+        "",
+        description,
+        flags=re.IGNORECASE,
+    )
+    description = " ".join(description.split())  # collapse whitespace
+
+    session["parsed"] = {
+        "description": description,
+        "size": size,
+        "max_price": max_price,
+    }
+
+    # Step 3: Search listings; bail early if nothing found
+    session["search_results"] = search_listings(
+        description=description,
+        size=size,
+        max_price=max_price,
+    )
+    if not session["search_results"]:
+        session["error"] = (
+            f"No listings found matching '{query}'. "
+            "Try broadening your search — different keywords, a higher price, or no size filter."
+        )
+        return session
+
+    # Step 4: Select top result
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 5: Suggest outfit
+    session["outfit_suggestion"] = suggest_outfit(
+        new_item=session["selected_item"],
+        wardrobe=session["wardrobe"],
+    )
+
+    # Step 6: Create fit card
+    session["fit_card"] = create_fit_card(
+        outfit=session["outfit_suggestion"],
+        new_item=session["selected_item"],
+    )
+
+    # Step 7: Return completed session
     return session
 
 
@@ -121,3 +187,4 @@ if __name__ == "__main__":
         wardrobe=get_example_wardrobe(),
     )
     print(f"Error message: {session2['error']}")
+    print(f"fit_card is None: {session2['fit_card'] is None}")
